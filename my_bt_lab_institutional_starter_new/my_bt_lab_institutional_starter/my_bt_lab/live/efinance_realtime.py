@@ -13,20 +13,22 @@ from .models import Market, Tick
 class EFinanceRealtimeGateway(MarketDataGateway):
     """A-share snapshot polling gateway backed by efinance.
 
-    efinance is used as a practical fallback when Tushare realtime_quote sources
-    return empty or non-JSON responses. This gateway is polling-based and is
-    intended for low-frequency paper trading and watchlist simulation.
+    efinance get_realtime_quotes expects a market/category name such as
+    ``沪深A股`` rather than a list of stock codes. This gateway fetches a
+    market snapshot and filters it down to the requested symbols.
     """
 
     def __init__(
         self,
         symbols: list[str],
         interval: float = 5.0,
+        fs: str = "沪深A股",
         max_consecutive_errors: int = 10,
         max_backoff_seconds: float = 30.0,
     ) -> None:
         self.symbols = symbols
         self.interval = interval
+        self.fs = fs
         self.max_consecutive_errors = max_consecutive_errors
         self.max_backoff_seconds = max_backoff_seconds
         self.tz = ZoneInfo("Asia/Shanghai")
@@ -55,13 +57,17 @@ class EFinanceRealtimeGateway(MarketDataGateway):
 
                 consecutive_errors = 0
                 if emitted == 0:
-                    print("[EFinanceRealtimeGateway] empty response; waiting for next poll", flush=True)
+                    print(
+                        f"[EFinanceRealtimeGateway] empty response after filtering; "
+                        f"fs={self.fs}, symbols={self.symbols}",
+                        flush=True,
+                    )
 
             except Exception as exc:
                 consecutive_errors += 1
                 print(
                     f"[EFinanceRealtimeGateway] error {consecutive_errors}/{self.max_consecutive_errors}: "
-                    f"{type(exc).__name__}: {exc}",
+                    f"{type(exc).__name__}: {exc}; fs={self.fs}",
                     flush=True,
                 )
                 if consecutive_errors >= self.max_consecutive_errors:
@@ -77,9 +83,21 @@ class EFinanceRealtimeGateway(MarketDataGateway):
     def _fetch_realtime_quote(self):
         import efinance as ef
 
-        # efinance accepts plain stock codes such as 000001 and 600519.
-        codes = [_strip_ts_suffix(symbol) for symbol in self.symbols]
-        return ef.stock.get_realtime_quotes(codes)
+        df = ef.stock.get_realtime_quotes(self.fs)
+        if df is None or df.empty or not self.symbols:
+            return df
+
+        wanted = {_strip_ts_suffix(symbol).zfill(6) for symbol in self.symbols}
+        code_column = _find_code_column(df.columns)
+        if code_column is None:
+            print(
+                f"[EFinanceRealtimeGateway] cannot find code column; columns={list(df.columns)}",
+                flush=True,
+            )
+            return df.iloc[0:0]
+
+        codes = df[code_column].astype(str).map(lambda value: _strip_ts_suffix(value).zfill(6))
+        return df[codes.isin(wanted)]
 
     def _row_to_tick(self, row: Any) -> Tick | None:
         code = _get(row, "股票代码", "代码", "code", "CODE")
@@ -103,10 +121,17 @@ class EFinanceRealtimeGateway(MarketDataGateway):
             bid_volume=_to_float(_get(row, "买一量", "B1_V", "b1_v")),
             ask_price=_to_float(_get(row, "卖一价", "A1_P", "a1_p")),
             ask_volume=_to_float(_get(row, "卖一量", "A1_V", "a1_v")),
-            source="EFINANCE_REALTIME_QUOTES",
+            source=f"EFINANCE_REALTIME_QUOTES:{self.fs}",
             is_realtime=False,
             is_delayed=False,
         )
+
+
+def _find_code_column(columns) -> str | None:
+    for name in ("股票代码", "代码", "code", "CODE"):
+        if name in columns:
+            return name
+    return None
 
 
 def _strip_ts_suffix(symbol: str) -> str:
