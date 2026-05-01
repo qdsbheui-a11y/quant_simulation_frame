@@ -25,12 +25,16 @@ class TushareRealtimeGateway(MarketDataGateway):
         token: str | None = None,
         src: str = "sn",
         chunk_size: int = 50,
+        max_consecutive_errors: int = 10,
+        max_backoff_seconds: float = 30.0,
     ) -> None:
         self.symbols = symbols
         self.interval = interval
         self.token = token or os.getenv("TUSHARE_TOKEN")
         self.src = src
         self.chunk_size = chunk_size
+        self.max_consecutive_errors = max_consecutive_errors
+        self.max_backoff_seconds = max_backoff_seconds
         self.tz = ZoneInfo("Asia/Shanghai")
         self._stopped = False
 
@@ -47,7 +51,10 @@ class TushareRealtimeGateway(MarketDataGateway):
 
     async def ticks(self) -> AsyncIterator[Tick]:
         await self.connect()
+        consecutive_errors = 0
+
         while not self._stopped:
+            emitted = 0
             try:
                 for group in _chunks(self.symbols, self.chunk_size):
                     df = await asyncio.to_thread(self._fetch_realtime_quote, group)
@@ -56,9 +63,29 @@ class TushareRealtimeGateway(MarketDataGateway):
                     for _, row in df.iterrows():
                         tick = self._row_to_tick(row)
                         if tick is not None:
+                            emitted += 1
                             yield tick
+
+                consecutive_errors = 0
+                if emitted == 0:
+                    print("[TushareRealtimeGateway] empty response; waiting for next poll", flush=True)
+
             except Exception as exc:
-                print(f"[TushareRealtimeGateway] error: {exc}")
+                consecutive_errors += 1
+                print(
+                    f"[TushareRealtimeGateway] error {consecutive_errors}/{self.max_consecutive_errors}: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                if consecutive_errors >= self.max_consecutive_errors:
+                    raise RuntimeError(
+                        "Tushare realtime polling failed repeatedly. "
+                        "Possible causes: remote source returned empty/non-JSON data, rate limit, network issue, "
+                        "invalid src, or market data source temporarily unavailable."
+                    ) from exc
+
+                await asyncio.sleep(min(self.interval * consecutive_errors, self.max_backoff_seconds))
+                continue
 
             await asyncio.sleep(self.interval)
 
