@@ -3,6 +3,7 @@ pandas>=2.0
 PyYAML>=6.0
 tushare>=1.4.0
 efinance>=0.5.3
+akshare>=1.15.0
 websockets>=12.0
 streamlit>=1.31.0
 PySide6>=6.7
