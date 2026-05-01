@@ -13,13 +13,21 @@ from .models import Market, Tick
 class BinanceSpotGateway(MarketDataGateway):
     """Free Binance spot BBO stream gateway.
 
-    Uses the public combined websocket endpoint and emits normalized Tick objects.
+    Uses a public combined websocket endpoint and emits normalized Tick objects.
     This gateway does not require an API key.
     """
 
-    def __init__(self, symbols: list[str], reconnect_delay: float = 3.0) -> None:
+    def __init__(
+        self,
+        symbols: list[str],
+        reconnect_delay: float = 3.0,
+        base_url: str = "wss://data-stream.binance.vision/stream?streams=",
+        open_timeout: float = 10.0,
+    ) -> None:
         self.symbols = [s.lower() for s in symbols]
         self.reconnect_delay = reconnect_delay
+        self.base_url = base_url
+        self.open_timeout = open_timeout
         self._ws: Any = None
         self._stopped = False
 
@@ -39,16 +47,19 @@ class BinanceSpotGateway(MarketDataGateway):
                 continue
 
             streams = "/".join(f"{symbol}@bookTicker" for symbol in self.symbols)
-            url = f"wss://stream.binance.com:9443/stream?streams={streams}"
+            url = f"{self.base_url}{streams}"
+            print(f"[BinanceSpotGateway] connecting: {url}", flush=True)
 
             try:
                 async with websockets.connect(
                     url,
+                    open_timeout=self.open_timeout,
                     ping_interval=20,
                     ping_timeout=60,
                     close_timeout=5,
                 ) as ws:
                     self._ws = ws
+                    print("[BinanceSpotGateway] connected", flush=True)
                     async for message in ws:
                         raw = json.loads(message)
                         data = raw.get("data", raw)
@@ -56,7 +67,7 @@ class BinanceSpotGateway(MarketDataGateway):
                         if tick is not None:
                             yield tick
             except Exception as exc:
-                print(f"[BinanceSpotGateway] reconnect after error: {exc}")
+                print(f"[BinanceSpotGateway] reconnect after error: {type(exc).__name__}: {exc}", flush=True)
                 await asyncio.sleep(self.reconnect_delay)
 
     async def close(self) -> None:
