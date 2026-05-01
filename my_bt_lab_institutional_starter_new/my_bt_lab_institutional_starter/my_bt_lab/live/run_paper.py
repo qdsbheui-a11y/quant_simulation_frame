@@ -55,6 +55,8 @@ async def amain() -> None:
     parser.add_argument("--record", default=None, help="Optional JSONL file path for recording normalized ticks")
     parser.add_argument("--replay-file", default=None, help="JSONL file recorded by --record")
     parser.add_argument("--replay-speed", type=float, default=0.0, help="Seconds to sleep after each replayed tick")
+    parser.add_argument("--tushare-src", default="sn", help="Tushare realtime source, e.g. sn")
+    parser.add_argument("--max-errors", type=int, default=10, help="Max consecutive polling errors before failing")
     args = parser.parse_args()
 
     max_ticks = None if args.max_ticks == 0 else args.max_ticks
@@ -64,7 +66,12 @@ async def amain() -> None:
         gateway = BinanceSpotGateway(parse_symbols(args.symbols, ["btcusdt"]))
         volume = args.volume if args.volume is not None else 0.001
     elif args.source == "tushare":
-        gateway = TushareRealtimeGateway(parse_symbols(args.symbols, ["000001.SZ"]), interval=args.interval)
+        gateway = TushareRealtimeGateway(
+            parse_symbols(args.symbols, ["000001.SZ"]),
+            interval=args.interval,
+            src=args.tushare_src,
+            max_consecutive_errors=args.max_errors,
+        )
         volume = args.volume if args.volume is not None else 100
     else:
         if not args.replay_file:
@@ -80,7 +87,10 @@ async def amain() -> None:
 
 
 def main() -> None:
-    asyncio.run(amain())
+    try:
+        asyncio.run(amain())
+    except KeyboardInterrupt:
+        print("stopped by user")
 
 
 if __name__ == "__main__":
