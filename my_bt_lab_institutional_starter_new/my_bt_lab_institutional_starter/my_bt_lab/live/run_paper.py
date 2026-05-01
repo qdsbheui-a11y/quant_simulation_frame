@@ -5,6 +5,7 @@ import asyncio
 
 from .binance_spot import BinanceSpotGateway
 from .demo_strategy import DemoBuyOnceStrategy
+from .efinance_realtime import EFinanceRealtimeGateway
 from .recorder import JsonlTickRecorder
 from .replay_gateway import ReplayGateway
 from .sim_broker import SimBroker
@@ -47,7 +48,7 @@ async def run_loop(
 
 async def amain() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", choices=["binance", "tushare", "replay"], default="binance")
+    parser.add_argument("--source", choices=["binance", "tushare", "efinance", "replay"], default="binance")
     parser.add_argument("--symbols", default=None)
     parser.add_argument("--volume", type=float, default=None)
     parser.add_argument("--interval", type=float, default=3.0)
@@ -55,7 +56,7 @@ async def amain() -> None:
     parser.add_argument("--record", default=None, help="Optional JSONL file path for recording normalized ticks")
     parser.add_argument("--replay-file", default=None, help="JSONL file recorded by --record")
     parser.add_argument("--replay-speed", type=float, default=0.0, help="Seconds to sleep after each replayed tick")
-    parser.add_argument("--tushare-src", default="sn", help="Tushare realtime source, e.g. sn")
+    parser.add_argument("--tushare-src", default="sina", help="Tushare realtime source, e.g. sina or dc")
     parser.add_argument("--max-errors", type=int, default=10, help="Max consecutive polling errors before failing")
     args = parser.parse_args()
 
@@ -70,6 +71,13 @@ async def amain() -> None:
             parse_symbols(args.symbols, ["000001.SZ"]),
             interval=args.interval,
             src=args.tushare_src,
+            max_consecutive_errors=args.max_errors,
+        )
+        volume = args.volume if args.volume is not None else 100
+    elif args.source == "efinance":
+        gateway = EFinanceRealtimeGateway(
+            parse_symbols(args.symbols, ["000001.SZ"]),
+            interval=args.interval,
             max_consecutive_errors=args.max_errors,
         )
         volume = args.volume if args.volume is not None else 100
