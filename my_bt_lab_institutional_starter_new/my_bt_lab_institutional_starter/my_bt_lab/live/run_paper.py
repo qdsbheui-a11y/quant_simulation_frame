@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 
+from .akshare_realtime import AkShareRealtimeGateway
 from .binance_spot import BinanceSpotGateway
 from .demo_strategy import DemoBuyOnceStrategy
 from .efinance_realtime import EFinanceRealtimeGateway
@@ -48,7 +49,7 @@ async def run_loop(
 
 async def amain() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", choices=["binance", "tushare", "efinance", "replay"], default="binance")
+    parser.add_argument("--source", choices=["binance", "tushare", "efinance", "akshare", "replay"], default="binance")
     parser.add_argument("--symbols", default=None)
     parser.add_argument("--volume", type=float, default=None)
     parser.add_argument("--interval", type=float, default=3.0)
@@ -76,6 +77,13 @@ async def amain() -> None:
         volume = args.volume if args.volume is not None else 100
     elif args.source == "efinance":
         gateway = EFinanceRealtimeGateway(
+            parse_symbols(args.symbols, ["000001.SZ"]),
+            interval=args.interval,
+            max_consecutive_errors=args.max_errors,
+        )
+        volume = args.volume if args.volume is not None else 100
+    elif args.source == "akshare":
+        gateway = AkShareRealtimeGateway(
             parse_symbols(args.symbols, ["000001.SZ"]),
             interval=args.interval,
             max_consecutive_errors=args.max_errors,
