@@ -23,7 +23,7 @@ class TushareRealtimeGateway(MarketDataGateway):
         symbols: list[str],
         interval: float = 3.0,
         token: str | None = None,
-        src: str = "sn",
+        src: str = "sina",
         chunk_size: int = 50,
         max_consecutive_errors: int = 10,
         max_backoff_seconds: float = 30.0,
@@ -31,7 +31,7 @@ class TushareRealtimeGateway(MarketDataGateway):
         self.symbols = symbols
         self.interval = interval
         self.token = token or os.getenv("TUSHARE_TOKEN")
-        self.src = src
+        self.src = _normalize_src(src)
         self.chunk_size = chunk_size
         self.max_consecutive_errors = max_consecutive_errors
         self.max_backoff_seconds = max_backoff_seconds
@@ -74,14 +74,14 @@ class TushareRealtimeGateway(MarketDataGateway):
                 consecutive_errors += 1
                 print(
                     f"[TushareRealtimeGateway] error {consecutive_errors}/{self.max_consecutive_errors}: "
-                    f"{type(exc).__name__}: {exc}",
+                    f"{type(exc).__name__}: {exc}; src={self.src}",
                     flush=True,
                 )
                 if consecutive_errors >= self.max_consecutive_errors:
                     raise RuntimeError(
                         "Tushare realtime polling failed repeatedly. "
-                        "Possible causes: remote source returned empty/non-JSON data, rate limit, network issue, "
-                        "invalid src, or market data source temporarily unavailable."
+                        "Try --tushare-src sina or --tushare-src dc, increase --interval, "
+                        "or switch to efinance/AkShare fallback for A-share snapshots."
                     ) from exc
 
                 await asyncio.sleep(min(self.interval * consecutive_errors, self.max_backoff_seconds))
@@ -131,6 +131,20 @@ class TushareRealtimeGateway(MarketDataGateway):
             return datetime.strptime(raw, "%Y%m%d %H:%M:%S").replace(tzinfo=self.tz)
         except Exception:
             return None
+
+
+def _normalize_src(src: str) -> str:
+    value = (src or "sina").strip().lower()
+    aliases = {
+        "sn": "sina",
+        "sina": "sina",
+        "新浪": "sina",
+        "dc": "dc",
+        "eastmoney": "dc",
+        "em": "dc",
+        "东方财富": "dc",
+    }
+    return aliases.get(value, value)
 
 
 def _infer_cn_stock_exchange(ts_code: str) -> str:
