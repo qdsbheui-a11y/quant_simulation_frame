@@ -6,3 +6,6 @@ __pycache__/
 *.py[cod]
 runs/
 **/runs/
+
+# Local SimNow/CTP credentials
+python-bridge/config.json
