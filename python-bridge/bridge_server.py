@@ -1,7 +1,8 @@
 """Python bridge service for the simulation framework.
 
-Default mode does not depend on vn.py. It can run a local mock tick source and
-broadcast ticks to WebSocket clients.
+Default mode does not depend on vn.py. It can run a local mock tick source,
+feed those ticks into the pure Python simulation engine, and broadcast market
+and simulation events to WebSocket clients.
 
 SimNow/CTP support is optional and is imported lazily only when --connect or
 /connect is used. This keeps local simulation development independent from
@@ -16,13 +17,17 @@ import json
 import random
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
+
+from simulation.engine import SimulationEngine
+from simulation.models import Direction, Offset, OrderRequest, OrderType, SimulationConfig, Tick
 
 
 CONFIG_PATH = Path("config.json")
@@ -58,6 +63,21 @@ class MockStartPayload(BaseModel):
     intervalSeconds: float = Field(default=DEFAULT_MOCK_INTERVAL_SECONDS, gt=0)
 
 
+class SimulationResetPayload(BaseModel):
+    initialBalance: float = Field(default=1_000_000.0, gt=0)
+    commissionRate: float = Field(default=0.0001, ge=0)
+    slippage: float = Field(default=0.0, ge=0)
+
+
+class SimulationOrderPayload(BaseModel):
+    vtSymbol: str
+    direction: str
+    offset: str = "OPEN"
+    price: float = Field(gt=0)
+    volume: float = Field(gt=0)
+    orderType: str = "LIMIT"
+
+
 class BridgeState:
     def __init__(self) -> None:
         self.started_at = datetime.now().isoformat(timespec="seconds")
@@ -75,6 +95,7 @@ class BridgeState:
         self.mock_task: asyncio.Task | None = None
         self.mock_prices: dict[str, float] = {}
         self.mock_volumes: dict[str, float] = {}
+        self.simulation = SimulationEngine()
         self.lock = threading.RLock()
 
     def snapshot(self) -> dict[str, Any]:
@@ -84,16 +105,33 @@ class BridgeState:
                 "connected": self.connected,
                 "subscriptions": sorted(self.subscriptions),
                 "lastLog": self.last_log,
-                "lastTick": asdict(self.last_tick) if self.last_tick else None,
+                "lastTick": to_jsonable(self.last_tick),
                 "websocketClients": len(self.websocket_clients),
                 "mockRunning": self.mock_running,
                 "mockSymbols": sorted(self.mock_symbols),
                 "mockIntervalSeconds": self.mock_interval_seconds,
+                "simulation": to_jsonable(self.simulation.snapshot()),
             }
 
 
 state = BridgeState()
 app = FastAPI(title="Quant Simulation Python Bridge")
+
+
+def to_jsonable(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if is_dataclass(value):
+        return {key: to_jsonable(val) for key, val in asdict(value).items()}
+    if isinstance(value, dict):
+        return {str(key): to_jsonable(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [to_jsonable(item) for item in value]
+    return value
 
 
 def load_config() -> dict:
@@ -140,13 +178,21 @@ def parse_vt_symbol(vt_symbol: str) -> tuple[str, str]:
     return symbol, exchange_name
 
 
-async def broadcast_tick(message: TickMessage) -> None:
-    payload = json.dumps({"type": "tick", "data": asdict(message)}, ensure_ascii=False)
+def parse_enum(enum_type: type[Enum], value: str) -> Enum:
+    normalized = value.upper()
+    try:
+        return enum_type(normalized)
+    except ValueError:
+        return enum_type[normalized]
+
+
+async def broadcast_payload(payload: dict[str, Any]) -> None:
+    text = json.dumps(payload, ensure_ascii=False)
     dead_clients: list[WebSocket] = []
 
     for ws in list(state.websocket_clients):
         try:
-            await ws.send_text(payload)
+            await ws.send_text(text)
         except Exception:
             dead_clients.append(ws)
 
@@ -154,13 +200,55 @@ async def broadcast_tick(message: TickMessage) -> None:
         state.websocket_clients.discard(ws)
 
 
+def emit_ws_event(event_type: str, data: Any) -> None:
+    payload = {"type": event_type, "data": to_jsonable(data)}
+    if state.loop:
+        asyncio.run_coroutine_threadsafe(broadcast_payload(payload), state.loop)
+
+
+def tick_message_to_tick(message: TickMessage) -> Tick:
+    symbol, exchange = parse_vt_symbol(message.vt_symbol)
+    if message.datetime:
+        tick_dt = datetime.fromisoformat(message.datetime)
+    else:
+        tick_dt = datetime.now()
+
+    return Tick(
+        vt_symbol=message.vt_symbol,
+        symbol=symbol,
+        exchange=exchange,
+        datetime=tick_dt,
+        last_price=message.last_price,
+        bid_price_1=message.bid_price_1,
+        bid_volume_1=message.bid_volume_1,
+        ask_price_1=message.ask_price_1,
+        ask_volume_1=message.ask_volume_1,
+        volume=message.volume,
+        open_interest=message.open_interest,
+        source=message.source,
+    )
+
+
 def publish_tick(message: TickMessage) -> None:
     with state.lock:
         state.last_tick = message
+        state.simulation.on_tick(tick_message_to_tick(message))
 
-    print("[TICK]", asdict(message))
-    if state.loop:
-        asyncio.run_coroutine_threadsafe(broadcast_tick(message), state.loop)
+    print("[TICK]", to_jsonable(message))
+    emit_ws_event("tick", message)
+
+
+def wire_simulation_callbacks() -> None:
+    state.simulation.on_order(lambda order: emit_ws_event("simulation.order", order))
+    state.simulation.on_trade(lambda trade: emit_ws_event("simulation.trade", trade))
+    state.simulation.on_account(lambda account: emit_ws_event("simulation.account", account))
+    state.simulation.on_position(lambda position: emit_ws_event("simulation.position", position))
+
+
+def reset_simulation(config: SimulationConfig | None = None) -> None:
+    with state.lock:
+        state.simulation = SimulationEngine(config)
+        wire_simulation_callbacks()
 
 
 def connect_gateway() -> None:
@@ -337,6 +425,7 @@ def stop_mock_source() -> None:
 @app.on_event("startup")
 async def on_startup() -> None:
     state.loop = asyncio.get_running_loop()
+    wire_simulation_callbacks()
     if startup_mock_symbols:
         start_mock_source(startup_mock_symbols, startup_mock_interval_seconds)
 
@@ -392,6 +481,63 @@ def mock_start(payload: MockStartPayload) -> dict[str, Any]:
 def mock_stop() -> dict[str, Any]:
     stop_mock_source()
     return {"ok": True, "message": "mock tick source stopped", **state.snapshot()}
+
+
+@app.post("/simulation/reset")
+def simulation_reset(payload: SimulationResetPayload) -> dict[str, Any]:
+    config = SimulationConfig(
+        initial_balance=payload.initialBalance,
+        commission_rate=payload.commissionRate,
+        slippage=payload.slippage,
+    )
+    reset_simulation(config)
+    return {"ok": True, "message": "simulation reset", "simulation": to_jsonable(state.simulation.snapshot())}
+
+
+@app.get("/simulation/account")
+def simulation_account() -> dict[str, Any]:
+    return {"ok": True, "data": to_jsonable(state.simulation.account)}
+
+
+@app.get("/simulation/positions")
+def simulation_positions() -> dict[str, Any]:
+    return {"ok": True, "data": to_jsonable(list(state.simulation.positions.values()))}
+
+
+@app.get("/simulation/orders")
+def simulation_orders() -> dict[str, Any]:
+    return {"ok": True, "data": to_jsonable(list(state.simulation.orders.values()))}
+
+
+@app.get("/simulation/trades")
+def simulation_trades() -> dict[str, Any]:
+    return {"ok": True, "data": to_jsonable(list(state.simulation.trades.values()))}
+
+
+@app.get("/simulation/snapshot")
+def simulation_snapshot() -> dict[str, Any]:
+    return {"ok": True, "data": to_jsonable(state.simulation.snapshot())}
+
+
+@app.post("/simulation/orders")
+def simulation_submit_order(payload: SimulationOrderPayload) -> dict[str, Any]:
+    parse_vt_symbol(payload.vtSymbol)
+    request = OrderRequest(
+        vt_symbol=payload.vtSymbol,
+        direction=parse_enum(Direction, payload.direction),
+        offset=parse_enum(Offset, payload.offset),
+        price=payload.price,
+        volume=payload.volume,
+        order_type=parse_enum(OrderType, payload.orderType),
+    )
+    order = state.simulation.submit_order(request)
+    return {"ok": True, "data": to_jsonable(order), "simulation": to_jsonable(state.simulation.snapshot())}
+
+
+@app.post("/simulation/orders/{order_id}/cancel")
+def simulation_cancel_order(order_id: str) -> dict[str, Any]:
+    order = state.simulation.cancel_order(order_id)
+    return {"ok": order is not None, "data": to_jsonable(order), "simulation": to_jsonable(state.simulation.snapshot())}
 
 
 @app.websocket("/ws/ticks")
