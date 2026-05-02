@@ -1,10 +1,15 @@
 # Python SimNow Bridge
 
-This directory contains the Python-based SimNow/CTP bridge for the simulation framework.
+This directory contains the Python-based bridge for the simulation framework.
+
+The bridge has two data sources:
+
+- SimNow/CTP through `vnpy` and `vnpy_ctp`.
+- Local mock ticks for development while SimNow is unavailable, locked, or under settlement initialization.
 
 ## Current status
 
-The bridge is Python-first. It uses `vnpy` and `vnpy_ctp` to connect to SimNow CTP.
+The bridge is Python-first. It uses `vnpy` and `vnpy_ctp` for SimNow/CTP integration, and FastAPI/WebSocket for downstream simulation clients.
 
 Validated locally so far:
 
@@ -54,7 +59,7 @@ Example:
 }
 ```
 
-## Smoke test
+## Smoke test: SimNow market data
 
 From `python-bridge`:
 
@@ -90,16 +95,46 @@ Health check:
 GET http://127.0.0.1:8765/health
 ```
 
-Start and connect to SimNow:
-
-```powershell
-python bridge_server.py --connect --subscribe au2606.SHFE
-```
-
 WebSocket tick stream:
 
 ```text
 ws://127.0.0.1:8765/ws/ticks
+```
+
+## Local mock tick source
+
+Start the bridge with mock ticks only:
+
+```powershell
+python bridge_server.py --mock au2606.SHFE rb2610.SHFE
+```
+
+Mock ticks are broadcast to:
+
+```text
+ws://127.0.0.1:8765/ws/ticks
+```
+
+Start mock ticks after the server is already running:
+
+```powershell
+curl -X POST http://127.0.0.1:8765/mock/start `
+  -H "Content-Type: application/json" `
+  -d "{\"symbols\":[\"au2606.SHFE\",\"rb2610.SHFE\"],\"intervalSeconds\":1}"
+```
+
+Stop mock ticks:
+
+```powershell
+curl -X POST http://127.0.0.1:8765/mock/stop
+```
+
+## SimNow bridge mode
+
+Start and connect to SimNow:
+
+```powershell
+python bridge_server.py --connect --subscribe au2606.SHFE
 ```
 
 The server intentionally does not auto-connect unless `--connect` is passed. This avoids repeated failed trade logins when the SimNow account is locked, inactive, or under settlement initialization.
