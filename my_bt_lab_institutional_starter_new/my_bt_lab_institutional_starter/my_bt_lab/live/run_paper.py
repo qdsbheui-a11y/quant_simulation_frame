@@ -12,6 +12,7 @@ from .mootdx_realtime import MootdxRealtimeGateway
 from .recorder import JsonlTickRecorder
 from .replay_gateway import ReplayGateway
 from .sim_broker import SimBroker
+from .simnow_ctp import SimNowCtpGateway
 from .tushare_realtime import TushareRealtimeGateway
 
 
@@ -51,7 +52,7 @@ async def run_loop(
 
 async def amain() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", choices=["binance", "tushare", "efinance", "akshare", "mootdx", "auto_ashare", "replay"], default="binance")
+    parser.add_argument("--source", choices=["binance", "tushare", "efinance", "akshare", "mootdx", "auto_ashare", "simnow", "replay"], default="binance")
     parser.add_argument("--symbols", default=None)
     parser.add_argument("--volume", type=float, default=None)
     parser.add_argument("--interval", type=float, default=3.0)
@@ -60,6 +61,7 @@ async def amain() -> None:
     parser.add_argument("--replay-file", default=None, help="JSONL file recorded by --record")
     parser.add_argument("--replay-speed", type=float, default=0.0, help="Seconds to sleep after each replayed tick")
     parser.add_argument("--tushare-src", default="sina", help="Tushare realtime source, e.g. sina or dc")
+    parser.add_argument("--simnow-config", default="my_bt_lab/live/config/simnow.local.json", help="SimNow local config JSON path")
     parser.add_argument("--max-errors", type=int, default=10, help="Max consecutive polling errors before failing")
     args = parser.parse_args()
 
@@ -106,6 +108,12 @@ async def amain() -> None:
             tushare_src=args.tushare_src,
         )
         volume = args.volume if args.volume is not None else 100
+    elif args.source == "simnow":
+        gateway = SimNowCtpGateway(
+            config_path=args.simnow_config,
+            symbols=parse_symbols(args.symbols, []),
+        )
+        volume = args.volume if args.volume is not None else 1
     else:
         if not args.replay_file:
             raise SystemExit("--replay-file is required when --source replay")
