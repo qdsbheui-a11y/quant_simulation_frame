@@ -1,15 +1,11 @@
 """Python bridge service for the simulation framework.
 
-Current scope:
-- exposes health/config endpoints;
-- optionally connects to SimNow through vn.py CTP gateway;
-- broadcasts ticks to WebSocket clients as JSON;
-- provides a local mock tick source so the simulation framework can progress
-  while SimNow is unavailable, locked, or under settlement initialization.
+Default mode does not depend on vn.py. It can run a local mock tick source and
+broadcast ticks to WebSocket clients.
 
-The service is deliberately safe by default: it does not auto-connect to SimNow
-unless --connect is passed. This avoids repeated failed trade logins while a
-SimNow account is locked or under settlement initialization.
+SimNow/CTP support is optional and is imported lazily only when --connect or
+/connect is used. This keeps local simulation development independent from
+vn.py/CTP installation and from the current SimNow account state.
 """
 
 from __future__ import annotations
@@ -27,12 +23,6 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
-from vnpy.event import Event, EventEngine
-from vnpy.trader.constant import Exchange
-from vnpy.trader.engine import MainEngine
-from vnpy.trader.event import EVENT_LOG, EVENT_TICK
-from vnpy.trader.object import SubscribeRequest
-from vnpy_ctp import CtpGateway
 
 
 CONFIG_PATH = Path("config.json")
@@ -77,8 +67,8 @@ class BridgeState:
         self.last_tick: TickMessage | None = None
         self.websocket_clients: set[WebSocket] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
-        self.event_engine: EventEngine | None = None
-        self.main_engine: MainEngine | None = None
+        self.event_engine: Any | None = None
+        self.main_engine: Any | None = None
         self.mock_running = False
         self.mock_symbols: set[str] = set()
         self.mock_interval_seconds = DEFAULT_MOCK_INTERVAL_SECONDS
@@ -150,11 +140,6 @@ def parse_vt_symbol(vt_symbol: str) -> tuple[str, str]:
     return symbol, exchange_name
 
 
-def to_subscribe_request(vt_symbol: str) -> SubscribeRequest:
-    symbol, exchange_name = parse_vt_symbol(vt_symbol)
-    return SubscribeRequest(symbol=symbol, exchange=Exchange(exchange_name))
-
-
 async def broadcast_tick(message: TickMessage) -> None:
     payload = json.dumps({"type": "tick", "data": asdict(message)}, ensure_ascii=False)
     dead_clients: list[WebSocket] = []
@@ -178,36 +163,51 @@ def publish_tick(message: TickMessage) -> None:
         asyncio.run_coroutine_threadsafe(broadcast_tick(message), state.loop)
 
 
-def on_log(event: Event) -> None:
-    log = event.data
-    msg = getattr(log, "msg", str(log))
-    gateway_name = getattr(log, "gateway_name", "")
-    line = f"[{gateway_name}] {msg}"
-    with state.lock:
-        state.last_log = line
-    print("[LOG]", line)
-
-
-def on_tick(event: Event) -> None:
-    tick = event.data
-    message = TickMessage(
-        vt_symbol=tick.vt_symbol,
-        symbol=tick.symbol,
-        exchange=tick.exchange.value,
-        datetime=tick.datetime.isoformat() if tick.datetime else None,
-        last_price=tick.last_price,
-        bid_price_1=tick.bid_price_1,
-        bid_volume_1=tick.bid_volume_1,
-        ask_price_1=tick.ask_price_1,
-        ask_volume_1=tick.ask_volume_1,
-        volume=tick.volume,
-        open_interest=tick.open_interest,
-        source="simnow",
-    )
-    publish_tick(message)
-
-
 def connect_gateway() -> None:
+    """Connect through vn.py CTP gateway.
+
+    This function intentionally imports vn.py lazily. Mock mode and the basic
+    HTTP/WebSocket bridge do not need vn.py installed.
+    """
+
+    try:
+        from vnpy.event import Event, EventEngine
+        from vnpy.trader.engine import MainEngine
+        from vnpy.trader.event import EVENT_LOG, EVENT_TICK
+        from vnpy_ctp import CtpGateway
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "SimNow mode requires optional dependencies. Install them with: "
+            "pip install -r requirements-simnow-vnpy.txt"
+        ) from exc
+
+    def on_log(event: Event) -> None:
+        log = event.data
+        msg = getattr(log, "msg", str(log))
+        gateway_name = getattr(log, "gateway_name", "")
+        line = f"[{gateway_name}] {msg}"
+        with state.lock:
+            state.last_log = line
+        print("[LOG]", line)
+
+    def on_tick(event: Event) -> None:
+        tick = event.data
+        message = TickMessage(
+            vt_symbol=tick.vt_symbol,
+            symbol=tick.symbol,
+            exchange=tick.exchange.value,
+            datetime=tick.datetime.isoformat() if tick.datetime else None,
+            last_price=tick.last_price,
+            bid_price_1=tick.bid_price_1,
+            bid_volume_1=tick.bid_volume_1,
+            ask_price_1=tick.ask_price_1,
+            ask_volume_1=tick.ask_volume_1,
+            volume=tick.volume,
+            open_interest=tick.open_interest,
+            source="simnow",
+        )
+        publish_tick(message)
+
     config = load_config()
     event_engine = EventEngine()
     main_engine = MainEngine(event_engine)
@@ -227,8 +227,18 @@ def subscribe(vt_symbols: list[str]) -> None:
     if not state.main_engine:
         raise RuntimeError("Gateway is not connected. Start server with --connect or call /connect first.")
 
+    try:
+        from vnpy.trader.constant import Exchange
+        from vnpy.trader.object import SubscribeRequest
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "SimNow subscription requires optional dependencies. Install them with: "
+            "pip install -r requirements-simnow-vnpy.txt"
+        ) from exc
+
     for vt_symbol in vt_symbols:
-        req = to_subscribe_request(vt_symbol)
+        symbol, exchange_name = parse_vt_symbol(vt_symbol)
+        req = SubscribeRequest(symbol=symbol, exchange=Exchange(exchange_name))
         state.main_engine.subscribe(req, "CTP")
         with state.lock:
             state.subscriptions.add(vt_symbol)
