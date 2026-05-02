@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime outputs
+runs/
+*.log
+
+# Local secrets / account configs
+my_bt_lab/live/config/*.local.json
+my_bt_lab/live/config/*secret*.json
+.env
