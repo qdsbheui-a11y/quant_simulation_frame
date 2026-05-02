@@ -1,0 +1,9 @@
+{
+  "investorId": "262600",
+  "password": "CHANGE_ME",
+  "brokerId": "9999",
+  "tdAddress": "tcp://182.254.243.31:40001",
+  "mdAddress": "tcp://182.254.243.31:40011",
+  "appId": "simnow_client_test",
+  "authCode": "0000000000000000"
+}
