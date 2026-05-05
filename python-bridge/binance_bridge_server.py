@@ -27,6 +27,9 @@ from simulation.models import Direction, Offset, OrderRequest, OrderType, Simula
 
 BINANCE_STREAM_BASE_URL = "wss://data-stream.binance.vision/stream?streams="
 DEFAULT_BINANCE_SYMBOLS = ["BTCUSDT"]
+DEFAULT_RECONNECT_DELAY_SECONDS = 3.0
+MAX_RECONNECT_DELAY_SECONDS = 30.0
+MARKET_DATA_STALE_SECONDS = 10.0
 
 startup_binance_symbols: list[str] = []
 
@@ -59,12 +62,21 @@ class BridgeState:
         self.binance_symbols: set[str] = set()
         self.binance_task: asyncio.Task | None = None
         self.last_tick: dict[str, Any] | None = None
+        self.last_tick_received_at: datetime | None = None
         self.last_log: str | None = None
+        self.reconnect_attempts = 0
+        self.current_reconnect_delay_seconds = DEFAULT_RECONNECT_DELAY_SECONDS
         self.simulation = SimulationEngine()
         self.lock = threading.RLock()
 
+    def tick_age_seconds(self) -> float | None:
+        if not self.last_tick_received_at:
+            return None
+        return round((datetime.now() - self.last_tick_received_at).total_seconds(), 3)
+
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
+            tick_age = self.tick_age_seconds()
             return {
                 "startedAt": self.started_at,
                 "source": "binance",
@@ -72,6 +84,11 @@ class BridgeState:
                 "binanceSymbols": sorted(self.binance_symbols),
                 "lastLog": self.last_log,
                 "lastTick": to_jsonable(self.last_tick),
+                "lastTickReceivedAt": to_jsonable(self.last_tick_received_at),
+                "lastTickAgeSeconds": tick_age,
+                "marketDataFresh": tick_age is not None and tick_age <= MARKET_DATA_STALE_SECONDS,
+                "reconnectAttempts": self.reconnect_attempts,
+                "currentReconnectDelaySeconds": self.current_reconnect_delay_seconds,
                 "websocketClients": len(self.websocket_clients),
                 "simulation": to_jsonable(self.simulation.snapshot()),
             }
@@ -194,6 +211,7 @@ def publish_tick(tick: Tick) -> None:
     tick_payload = to_jsonable(tick)
     with state.lock:
         state.last_tick = tick_payload
+        state.last_tick_received_at = datetime.now()
         state.simulation.on_tick(tick)
     print("[BINANCE_TICK]", tick_payload)
     emit_ws_event("tick", tick_payload)
@@ -228,6 +246,8 @@ async def binance_tick_loop() -> None:
                 ) as ws:
                     with state.lock:
                         state.last_log = "binance connected"
+                        state.reconnect_attempts = 0
+                        state.current_reconnect_delay_seconds = DEFAULT_RECONNECT_DELAY_SECONDS
                     print("[BINANCE] connected")
 
                     async for message in ws:
@@ -241,9 +261,18 @@ async def binance_tick_loop() -> None:
                 raise
             except Exception as exc:
                 with state.lock:
-                    state.last_log = f"binance reconnect after {type(exc).__name__}: {exc}"
-                print(f"[BINANCE] reconnect after error: {type(exc).__name__}: {exc}")
-                await asyncio.sleep(3)
+                    state.reconnect_attempts += 1
+                    delay = min(
+                        DEFAULT_RECONNECT_DELAY_SECONDS * (2 ** min(state.reconnect_attempts - 1, 4)),
+                        MAX_RECONNECT_DELAY_SECONDS,
+                    )
+                    state.current_reconnect_delay_seconds = delay
+                    state.last_log = (
+                        f"binance reconnect after {type(exc).__name__}: {exc}; "
+                        f"retry in {delay}s"
+                    )
+                print(f"[BINANCE] reconnect after error: {type(exc).__name__}: {exc}; retry in {delay}s")
+                await asyncio.sleep(delay)
     except asyncio.CancelledError:
         print("[BINANCE] tick source stopped")
         raise
@@ -256,6 +285,8 @@ def start_binance_source(symbols: list[str]) -> None:
     with state.lock:
         state.binance_symbols = set(normalized)
         state.binance_running = True
+        state.reconnect_attempts = 0
+        state.current_reconnect_delay_seconds = DEFAULT_RECONNECT_DELAY_SECONDS
         if state.binance_task and not state.binance_task.done():
             state.binance_task.cancel()
         state.binance_task = state.loop.create_task(binance_tick_loop())
