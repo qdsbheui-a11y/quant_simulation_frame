@@ -21,6 +21,7 @@ from typing import Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
+from realtime import BuyAndHoldOnFirstTickStrategy, RealtimeStrategyRunner
 from simulation.engine import SimulationEngine
 from simulation.models import Direction, Offset, OrderRequest, OrderType, SimulationConfig, Tick
 
@@ -32,6 +33,8 @@ MAX_RECONNECT_DELAY_SECONDS = 30.0
 MARKET_DATA_STALE_SECONDS = 10.0
 
 startup_binance_symbols: list[str] = []
+startup_strategy_name: str | None = None
+startup_strategy_volume: float = 1.0
 
 
 class SimulationResetPayload(BaseModel):
@@ -53,6 +56,12 @@ class BinanceStartPayload(BaseModel):
     symbols: list[str] = Field(default_factory=lambda: DEFAULT_BINANCE_SYMBOLS.copy())
 
 
+class StrategyStartPayload(BaseModel):
+    name: str = "buy-and-hold"
+    symbols: list[str] = Field(default_factory=list)
+    volume: float = Field(default=1.0, gt=0)
+
+
 class BridgeState:
     def __init__(self) -> None:
         self.started_at = datetime.now().isoformat(timespec="seconds")
@@ -67,12 +76,29 @@ class BridgeState:
         self.reconnect_attempts = 0
         self.current_reconnect_delay_seconds = DEFAULT_RECONNECT_DELAY_SECONDS
         self.simulation = SimulationEngine()
+        self.strategy_runner: RealtimeStrategyRunner | None = None
+        self.strategy_name: str | None = None
+        self.strategy_symbols: set[str] = set()
+        self.strategy_volume: float = 0.0
+        self.last_strategy_orders: list[dict[str, Any]] = []
         self.lock = threading.RLock()
 
     def tick_age_seconds(self) -> float | None:
         if not self.last_tick_received_at:
             return None
         return round((datetime.now() - self.last_tick_received_at).total_seconds(), 3)
+
+    def strategy_snapshot(self) -> dict[str, Any]:
+        runner = self.strategy_runner
+        return {
+            "enabled": runner.enabled if runner else False,
+            "name": self.strategy_name,
+            "symbols": sorted(self.strategy_symbols),
+            "volume": self.strategy_volume,
+            "generatedOrders": runner.generated_orders if runner else 0,
+            "lastError": runner.last_error if runner else None,
+            "lastOrders": self.last_strategy_orders,
+        }
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -90,6 +116,7 @@ class BridgeState:
                 "reconnectAttempts": self.reconnect_attempts,
                 "currentReconnectDelaySeconds": self.current_reconnect_delay_seconds,
                 "websocketClients": len(self.websocket_clients),
+                "strategy": self.strategy_snapshot(),
                 "simulation": to_jsonable(self.simulation.snapshot()),
             }
 
@@ -173,6 +200,58 @@ def reset_simulation(config: SimulationConfig | None = None) -> None:
     with state.lock:
         state.simulation = SimulationEngine(config)
         wire_simulation_callbacks()
+        if state.strategy_runner:
+            restart_realtime_strategy_locked(state.strategy_name, list(state.strategy_symbols), state.strategy_volume)
+
+
+def restart_realtime_strategy_locked(name: str | None, symbols: list[str], volume: float) -> None:
+    if not name:
+        state.strategy_runner = None
+        state.strategy_name = None
+        state.strategy_symbols = set()
+        state.strategy_volume = 0.0
+        state.last_strategy_orders = []
+        return
+
+    normalized_name = name.strip().lower()
+    vt_symbols = {binance_to_vt_symbol(symbol) for symbol in symbols}
+    if normalized_name in {"buy-and-hold", "buy_and_hold", "hold"}:
+        strategy = BuyAndHoldOnFirstTickStrategy(symbols=vt_symbols, volume=volume)
+    else:
+        raise ValueError(f"unsupported realtime strategy: {name}")
+
+    state.strategy_runner = RealtimeStrategyRunner(strategy=strategy, engine=state.simulation)
+    state.strategy_name = "buy-and-hold"
+    state.strategy_symbols = vt_symbols
+    state.strategy_volume = volume
+    state.last_strategy_orders = []
+
+
+def start_realtime_strategy(name: str, symbols: list[str], volume: float) -> None:
+    if not symbols:
+        with state.lock:
+            symbols = sorted(state.binance_symbols)
+    with state.lock:
+        restart_realtime_strategy_locked(name, symbols, volume)
+
+
+def stop_realtime_strategy() -> None:
+    with state.lock:
+        restart_realtime_strategy_locked(None, [], 0.0)
+
+
+def apply_realtime_strategy(tick: Tick) -> list[dict[str, Any]]:
+    with state.lock:
+        runner = state.strategy_runner
+        if not runner:
+            return []
+        requests = runner.on_tick(tick)
+        orders = [state.simulation.submit_order(request) for request in requests]
+        payload = [to_jsonable(order) for order in orders]
+        if payload:
+            state.last_strategy_orders = payload
+            emit_ws_event("strategy.orders", payload)
+        return payload
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -213,7 +292,10 @@ def publish_tick(tick: Tick) -> None:
         state.last_tick = tick_payload
         state.last_tick_received_at = datetime.now()
         state.simulation.on_tick(tick)
+    strategy_orders = apply_realtime_strategy(tick)
     print("[BINANCE_TICK]", tick_payload)
+    if strategy_orders:
+        print("[STRATEGY_ORDERS]", strategy_orders)
     emit_ws_event("tick", tick_payload)
 
 
@@ -304,6 +386,8 @@ def stop_binance_source() -> None:
 async def on_startup() -> None:
     state.loop = asyncio.get_running_loop()
     wire_simulation_callbacks()
+    if startup_strategy_name and startup_binance_symbols:
+        start_realtime_strategy(startup_strategy_name, startup_binance_symbols, startup_strategy_volume)
     if startup_binance_symbols:
         start_binance_source(startup_binance_symbols)
 
@@ -328,6 +412,23 @@ def binance_start(payload: BinanceStartPayload) -> dict[str, Any]:
 def binance_stop() -> dict[str, Any]:
     stop_binance_source()
     return {"ok": True, "message": "binance tick source stopped", **state.snapshot()}
+
+
+@app.post("/strategy/start")
+def strategy_start(payload: StrategyStartPayload) -> dict[str, Any]:
+    start_realtime_strategy(payload.name, payload.symbols, payload.volume)
+    return {"ok": True, "message": "strategy started", "strategy": state.strategy_snapshot()}
+
+
+@app.post("/strategy/stop")
+def strategy_stop() -> dict[str, Any]:
+    stop_realtime_strategy()
+    return {"ok": True, "message": "strategy stopped", "strategy": state.strategy_snapshot()}
+
+
+@app.get("/strategy/status")
+def strategy_status() -> dict[str, Any]:
+    return {"ok": True, "data": state.strategy_snapshot()}
 
 
 @app.post("/simulation/reset")
@@ -402,16 +503,21 @@ async def websocket_ticks(ws: WebSocket) -> None:
 
 
 def main() -> None:
-    global startup_binance_symbols
+    global startup_binance_symbols, startup_strategy_name, startup_strategy_volume
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=8765, type=int)
     parser.add_argument("--binance", nargs="*", default=[])
+    parser.add_argument("--strategy", choices=["buy-and-hold"], default=None)
+    parser.add_argument("--strategy-volume", type=float, default=1.0)
     args = parser.parse_args()
 
     if args.binance:
         startup_binance_symbols = [normalize_binance_symbol(symbol) for symbol in args.binance]
+    if args.strategy:
+        startup_strategy_name = args.strategy
+        startup_strategy_volume = args.strategy_volume
 
     import uvicorn
 
