@@ -4,7 +4,7 @@ import argparse
 import csv
 import json
 from dataclasses import asdict
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 import sys
 from typing import Any
@@ -14,6 +14,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backtest import BacktestConfig, BacktestRunner, CsvDailyBarDataSource, EqualWeightSmallCapStrategy
+
+
+REQUIRED_COLUMNS = ["date", "vt_symbol", "open_price", "high_price", "low_price", "close_price"]
+OPTIONAL_SMALL_CAP_COLUMNS = [
+    "float_market_cap",
+    "total_market_cap",
+    "turnover",
+    "is_st",
+    "is_suspended",
+    "listing_days",
+    "limit_up",
+    "limit_down",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,6 +58,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    _validate_data_path(Path(args.data))
+
     start_date = _parse_date(args.start)
     end_date = _parse_date(args.end)
 
@@ -72,6 +87,12 @@ def main() -> None:
     runner = BacktestRunner(data_source=data_source, strategy=strategy, config=config)
     result = runner.run(start_date=start_date, end_date=end_date)
 
+    if not result.equity_curve:
+        raise SystemExit(
+            "No bars were loaded for the requested date range. "
+            "Check --data, --start, --end, and CSV date values."
+        )
+
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -89,6 +110,22 @@ def main() -> None:
     print("Metrics")
     for key, value in result.metrics.items():
         print(f"{key}: {_format_metric(value)}")
+
+
+def _validate_data_path(path: Path) -> None:
+    if not path.exists():
+        example_columns = ",".join(REQUIRED_COLUMNS + OPTIONAL_SMALL_CAP_COLUMNS)
+        raise SystemExit(
+            f"Data path does not exist: {path}\n"
+            "Create the directory or pass an existing CSV file/directory with --data.\n"
+            "Required columns: " + ", ".join(REQUIRED_COLUMNS) + "\n"
+            "Recommended small-cap columns: " + ", ".join(OPTIONAL_SMALL_CAP_COLUMNS) + "\n"
+            "CSV header example:\n"
+            f"{example_columns}"
+        )
+
+    if path.is_dir() and not list(path.glob("*.csv")):
+        raise SystemExit(f"Data directory contains no CSV files: {path}")
 
 
 def _parse_date(value: str | None) -> date | None:
