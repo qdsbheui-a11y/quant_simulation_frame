@@ -20,6 +20,7 @@ Validated locally so far:
 - SimNow 7x24 trade front `tcp://182.254.243.31:40001` can connect and authorize.
 - Local paper-trading simulation engine supports order matching, account state, position state, and callbacks.
 - Binance bridge can consume public bookTicker WebSocket data and feed ticks into the local simulation engine.
+- Realtime strategy runner can consume Binance ticks and submit simulated orders automatically.
 
 Known external blockers:
 
@@ -159,6 +160,17 @@ Start real-time Binance ticks:
 python binance_bridge_server.py --binance BTCUSDT ETHUSDT BNBUSDT
 ```
 
+Start real-time Binance ticks and enable the built-in buy-and-hold smoke-test strategy:
+
+```bash
+python binance_bridge_server.py \
+  --binance BTCUSDT ETHUSDT BNBUSDT \
+  --strategy buy-and-hold \
+  --strategy-volume 1
+```
+
+The built-in `buy-and-hold` strategy submits one simulated market buy order per configured Binance symbol after the first usable tick. It intentionally does not submit on every tick.
+
 Health check in another terminal:
 
 ```bash
@@ -172,9 +184,22 @@ binanceRunning: true
 binanceSymbols: ["BNBUSDT", "BTCUSDT", "ETHUSDT"]
 lastTick: not null
 marketDataFresh: true
+strategy.enabled: true
+strategy.generatedOrders: greater than 0 after first ticks
 ```
 
-Submit a simulated market buy order:
+You can also start or stop the realtime strategy after the server is running:
+
+```bash
+curl -X POST http://127.0.0.1:8765/strategy/start \
+  -H "Content-Type: application/json" \
+  -d '{"name":"buy-and-hold","symbols":["BTCUSDT","ETHUSDT"],"volume":1}'
+
+curl http://127.0.0.1:8765/strategy/status
+curl -X POST http://127.0.0.1:8765/strategy/stop
+```
+
+Submit a manual simulated market buy order:
 
 ```bash
 curl -X POST http://127.0.0.1:8765/simulation/orders \
