@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from backtest import BacktestConfig, BacktestRunner, CsvDailyBarDataSource, EqualWeightSmallCapStrategy
+from backtest import BacktestConfig, BacktestRunner, CsvDailyBarDataSource, EqualWeightSmallCapStrategy, write_html_report
 
 
 REQUIRED_COLUMNS = ["date", "vt_symbol", "open_price", "high_price", "low_price", "close_price"]
@@ -32,7 +32,7 @@ OPTIONAL_SMALL_CAP_COLUMNS = [
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run an equal-weight small-cap daily backtest.")
     parser.add_argument("--data", required=True, help="CSV file or directory containing daily bar CSV files.")
-    parser.add_argument("--output", default="backtest_output", help="Directory for result CSV/JSON files.")
+    parser.add_argument("--output", default="backtest_output", help="Directory for result CSV/JSON/HTML files.")
     parser.add_argument("--start", default=None, help="Start date, format YYYY-MM-DD.")
     parser.add_argument("--end", default=None, help="End date, format YYYY-MM-DD.")
 
@@ -100,12 +100,40 @@ def main() -> None:
     _write_trades(output_dir / "trades.csv", result.trades)
     _write_positions(output_dir / "final_positions.csv", result.final_positions)
     _write_json(output_dir / "metrics.json", result.metrics)
+    report_path = output_dir / "report.html"
+    write_html_report(
+        report_path,
+        result,
+        title="Small-cap Strategy Tester Report",
+        parameters={
+            "data": args.data,
+            "start": args.start,
+            "end": args.end,
+            "strategy": "EqualWeightSmallCapStrategy",
+            "top_n": args.top_n,
+            "initial_cash": args.initial_cash,
+            "rebalance": args.rebalance,
+            "price_field": args.price_field,
+            "commission_rate": args.commission_rate,
+            "min_commission": args.min_commission,
+            "stamp_tax_rate": args.stamp_tax_rate,
+            "slippage_bps": args.slippage_bps,
+            "cash_buffer": args.cash_buffer,
+            "lot_size": args.lot_size,
+            "min_listing_days": args.min_listing_days,
+            "min_turnover": args.min_turnover,
+            "market_cap_field": args.market_cap_field,
+            "include_limit_up": args.include_limit_up,
+            "include_limit_down": args.include_limit_down,
+        },
+    )
 
     print("Backtest completed")
     print(f"equity_curve: {output_dir / 'equity_curve.csv'}")
     print(f"trades:       {output_dir / 'trades.csv'}")
     print(f"positions:    {output_dir / 'final_positions.csv'}")
     print(f"metrics:      {output_dir / 'metrics.json'}")
+    print(f"report:       {report_path}")
     print("")
     print("Metrics")
     for key, value in result.metrics.items():
