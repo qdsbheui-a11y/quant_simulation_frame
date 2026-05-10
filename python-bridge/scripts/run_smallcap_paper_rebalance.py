@@ -48,17 +48,22 @@ def main() -> None:
     if not bars:
         raise SystemExit(f"No bars found for date {trading_date} from {args.data}")
 
-    snapshot = request_json("GET", f"{base_url}/simulation/snapshot")
-    if not snapshot.get("ok"):
-        raise SystemExit(f"simulation snapshot failed: {snapshot}")
-
-    simulation = snapshot["data"]
-    positions = parse_positions(simulation.get("positions", []))
-    account = simulation.get("account", {})
+    positions: dict[str, PositionState] = {}
     account_value = args.account_value
-    if account_value is None:
-        account_value = float(account.get("balance", 0.0)) + float(account.get("unrealized_pnl", 0.0))
-    if account_value <= 0:
+
+    # Offline dry-run mode: when account value is supplied, no simulation server is required.
+    if not (args.dry_run and account_value is not None):
+        snapshot = request_json("GET", f"{base_url}/simulation/snapshot")
+        if not snapshot.get("ok"):
+            raise SystemExit(f"simulation snapshot failed: {snapshot}")
+
+        simulation = snapshot["data"]
+        positions = parse_positions(simulation.get("positions", []))
+        account = simulation.get("account", {})
+        if account_value is None:
+            account_value = float(account.get("balance", 0.0)) + float(account.get("unrealized_pnl", 0.0))
+
+    if account_value is None or account_value <= 0:
         raise SystemExit("account value must be positive. Use --account-value if the API account snapshot is empty.")
 
     config = SmallCapPaperConfig(
@@ -77,6 +82,7 @@ def main() -> None:
     print("Small-cap paper rebalance plan")
     print(f"date:             {trading_date}")
     print(f"account value:    {account_value}")
+    print(f"positions source: {'offline empty positions' if not positions else 'simulation snapshot'}")
     print(f"selected symbols: {len(plan.selected_symbols)}")
     print(f"sell orders:      {len(plan.sell_orders)}")
     print(f"buy orders:       {len(plan.buy_orders)}")
@@ -143,6 +149,11 @@ def request_json(method: str, url: str, payload: dict[str, Any] | None = None) -
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8")
         raise RuntimeError(f"{method} {url} failed: HTTP {exc.code}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"{method} {url} failed: {exc}. Start the simulation server first, "
+            "or use --dry-run together with --account-value for offline planning."
+        ) from exc
 
 
 if __name__ == "__main__":
