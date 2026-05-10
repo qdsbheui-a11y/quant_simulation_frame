@@ -4,6 +4,8 @@ from datetime import date
 from pathlib import Path
 import sys
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -78,7 +80,7 @@ def test_backtest_runner_rebalances_and_records_equity() -> None:
     assert len(result.equity_curve) == 2
     assert result.final_positions["000001.SZ"].volume == 10_000
     assert result.equity_curve[-1].total_equity == 110_000
-    assert result.metrics["total_return"] == 0.1
+    assert result.metrics["total_return"] == pytest.approx(0.1)
 
 
 def test_runner_sells_removed_symbol_before_buying_new_symbol() -> None:
