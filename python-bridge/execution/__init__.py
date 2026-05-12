@@ -1,7 +1,6 @@
-from __future__ import annotations
+"""Execution-layer models and adapters."""
 
-from data.models import BarData, TickData
-from execution.models import (
+from .models import (
     AccountState,
     Direction,
     Offset,
@@ -15,11 +14,8 @@ from execution.models import (
     Trade,
 )
 
-Tick = TickData
-
 __all__ = [
     "AccountState",
-    "BarData",
     "Direction",
     "Offset",
     "Order",
@@ -29,7 +25,5 @@ __all__ = [
     "OrderType",
     "Position",
     "SimulationConfig",
-    "Tick",
-    "TickData",
     "Trade",
 ]
