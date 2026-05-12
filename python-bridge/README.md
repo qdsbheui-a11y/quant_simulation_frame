@@ -138,3 +138,35 @@ python bridge_server.py --connect --subscribe au2606.SHFE
 ```
 
 The server intentionally does not auto-connect unless `--connect` is passed. This avoids repeated failed trade logins when the SimNow account is locked, inactive, or under settlement initialization.
+
+## Unified strategy/runtime architecture
+
+The local Python bridge now separates strategy, runtime, execution, and matching
+concerns so the same strategy class can be used for historical tick replay and
+real-time paper trading.
+
+Packages:
+
+- `data/`: canonical `TickData` and `BarData` market-data payloads.
+- `strategy/`: `BaseStrategy`, `StrategyContext`, and strategy-emitted
+  `OrderIntent` helpers.
+- `runtime/`: shared runtime loop plus `SimulationRuntime` for live ticks.
+- `execution/`: execution-layer models and `SimulationExecution`, which converts
+  `OrderIntent` into `OrderRequest`.
+- `simulation/`: realtime paper-trading chain split into `Broker`, `Exchange`,
+  and `Matcher`, with `SimulationEngine` kept as the public facade.
+- `backtest/`: `BacktestRuntime` and a minimal `BacktestExecution` placeholder
+  ready for a future Backtrader wrapper.
+
+Runtime flows:
+
+```text
+real tick -> TickData -> BaseStrategy -> OrderIntent -> OrderRequest
+          -> SimulationExecution -> SimulationEngine -> Broker -> Exchange
+          -> Matcher -> Trade
+```
+
+```text
+historical tick -> BacktestRuntime -> same BaseStrategy -> BacktestExecution
+                -> backtest snapshot/results
+```
