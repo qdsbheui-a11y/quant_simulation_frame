@@ -2,10 +2,11 @@
 
 This directory contains the Python-based bridge for the simulation framework.
 
-The bridge has two data sources:
+The bridge has these data sources:
 
 - SimNow/CTP through `vnpy` and `vnpy_ctp`.
 - Local mock ticks for development while SimNow is unavailable, locked, or under settlement initialization.
+- Binance public WebSocket market data through `binance_bridge_server.py`.
 
 ## Current status
 
@@ -17,10 +18,14 @@ Validated locally so far:
 - `vnpy==4.3.0` and `vnpy_ctp==6.7.11.4` install successfully on Windows with Python 3.13.
 - SimNow 7x24 market front `tcp://182.254.243.31:40011` can connect and log in.
 - SimNow 7x24 trade front `tcp://182.254.243.31:40001` can connect and authorize.
+- Local paper-trading simulation engine supports order matching, account state, position state, and callbacks.
+- Binance bridge can consume public bookTicker WebSocket data and feed ticks into the local simulation engine.
+- Realtime strategy runner can consume Binance ticks and submit simulated orders automatically.
 
-Known external blocker:
+Known external blockers:
 
 - Trade login may fail if the SimNow account password/status is invalid or temporarily locked. Do not repeatedly retry trade login after error 75.
+- Binance REST/WebSocket access may return HTTP 451 in restricted regions or networks. This is an upstream access restriction, not a local strategy or CSV parsing error.
 
 ## Setup
 
@@ -138,3 +143,80 @@ python bridge_server.py --connect --subscribe au2606.SHFE
 ```
 
 The server intentionally does not auto-connect unless `--connect` is passed. This avoids repeated failed trade logins when the SimNow account is locked, inactive, or under settlement initialization.
+
+## Binance real-time tick bridge
+
+This mode consumes Binance public bookTicker WebSocket streams and feeds converted ticks into `SimulationEngine`. No Binance API key is required because it only uses public market data.
+
+Install dependencies from `python-bridge`:
+
+```bash
+pip install -r requirements.txt
+```
+
+Start real-time Binance ticks:
+
+```bash
+python binance_bridge_server.py --binance BTCUSDT ETHUSDT BNBUSDT
+```
+
+Start real-time Binance ticks and enable the built-in buy-and-hold smoke-test strategy:
+
+```bash
+python binance_bridge_server.py \
+  --binance BTCUSDT ETHUSDT BNBUSDT \
+  --strategy buy-and-hold \
+  --strategy-volume 1
+```
+
+The built-in `buy-and-hold` strategy submits one simulated market buy order per configured Binance symbol after the first usable tick. It intentionally does not submit on every tick.
+
+Health check in another terminal:
+
+```bash
+curl http://127.0.0.1:8765/health
+```
+
+Expected health fields:
+
+```text
+binanceRunning: true
+binanceSymbols: ["BNBUSDT", "BTCUSDT", "ETHUSDT"]
+lastTick: not null
+marketDataFresh: true
+strategy.enabled: true
+strategy.generatedOrders: greater than 0 after first ticks
+```
+
+You can also start or stop the realtime strategy after the server is running:
+
+```bash
+curl -X POST http://127.0.0.1:8765/strategy/start \
+  -H "Content-Type: application/json" \
+  -d '{"name":"buy-and-hold","symbols":["BTCUSDT","ETHUSDT"],"volume":1}'
+
+curl http://127.0.0.1:8765/strategy/status
+curl -X POST http://127.0.0.1:8765/strategy/stop
+```
+
+Submit a manual simulated market buy order:
+
+```bash
+curl -X POST http://127.0.0.1:8765/simulation/orders \
+  -H "Content-Type: application/json" \
+  -d '{"vtSymbol":"BTCUSDT.BINANCE","direction":"LONG","offset":"OPEN","price":1,"volume":1,"orderType":"MARKET"}'
+```
+
+Query simulation state:
+
+```bash
+curl http://127.0.0.1:8765/simulation/account
+curl http://127.0.0.1:8765/simulation/positions
+curl http://127.0.0.1:8765/simulation/trades
+```
+
+Important distinction:
+
+- `binance_bridge_server.py` is for real-time paper trading / forward simulation from live ticks.
+- `scripts/download_binance_klines.py` is for historical K-line download and backtesting.
+- If REST K-line download returns HTTP 451, use real-time WebSocket mode or a legally permitted data source for your region.
